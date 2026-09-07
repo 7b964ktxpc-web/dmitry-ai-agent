@@ -51,38 +51,49 @@ export async function POST(request: NextRequest) {
         if (agentId) await supabase.from('agent_profiles').insert({ agent_id: agentId });
       }
 
-      const { data: profile } = agentId
-        ? await supabase.from('agent_profiles').select('onboarding_answers').eq('agent_id', agentId).maybeSingle()
-        : { data: null };
-      const answers = (profile?.onboarding_answers ?? {}) as Record<string, string>;
-      const keys: OnboardingStep[] = ['name', 'tasks', 'style', 'memory', 'tools'];
-      currentStep = keys.find((key) => !answers[key]) ?? 'done';
-
       if (text === '/start') {
+        if (agentId) {
+          await supabase.from('agent_profiles').update({ onboarding_answers: {}, updated_at: new Date().toISOString() }).eq('agent_id', agentId);
+          await supabase.from('agents').update({ status: 'setup', updated_at: new Date().toISOString() }).eq('id', agentId);
+        }
+        await supabase.from('users').update({ onboarding_completed: false, updated_at: new Date().toISOString() }).eq('id', userId);
         currentStep = 'name';
         reply = `Привет, ${from.first_name ?? ''}! 👋\n\nЯ помогу создать твоего персонального ИИ-помощника.\n\n${onboardingQuestions.name}`.trim();
-      } else if (currentStep !== 'done') {
-        answers[currentStep] = text;
-        const upcoming = nextStep(currentStep);
-        await supabase.from('agent_profiles').update({ onboarding_answers: answers, updated_at: new Date().toISOString() }).eq('agent_id', agentId);
-        if (upcoming === 'done') {
-          await supabase.from('agents').update({ status: 'online', updated_at: new Date().toISOString() }).eq('id', agentId);
-          await supabase.from('users').update({ onboarding_completed: true, updated_at: new Date().toISOString() }).eq('id', userId);
-          reply = 'Готово! 🎉 Я настроил твоего персонального помощника.\n\nТеперь просто пиши мне обычными сообщениями — задачи, вопросы, идеи. По мере работы я буду запоминать полезный контекст и подключать нужные инструменты.';
-        } else reply = onboardingQuestions[upcoming];
-        currentStep = upcoming;
+      } else if (!text) {
+        reply = 'Напиши сообщение текстом — я подскажу, что делать дальше 🙂';
       } else {
-        reply = demoReply(text);
-        if (agentId) {
-          const { data: conversation } = await supabase.from('conversations').upsert({ agent_id: agentId, channel: 'telegram', external_chat_id: String(chatId), updated_at: new Date().toISOString() }, { onConflict: 'agent_id,external_chat_id' }).select().single();
-          if (conversation) {
-            await supabase.from('messages').insert([{ conversation_id: conversation.id, role: 'user', content: text }, { conversation_id: conversation.id, role: 'assistant', content: reply }]);
-            await supabase.from('usage_events').insert({ agent_id: agentId, event_type: 'message' });
+        const { data: profile } = agentId
+          ? await supabase.from('agent_profiles').select('onboarding_answers').eq('agent_id', agentId).maybeSingle()
+          : { data: null };
+        const answers = (profile?.onboarding_answers ?? {}) as Record<string, string>;
+        const keys: OnboardingStep[] = ['name', 'tasks', 'style', 'memory', 'tools'];
+        currentStep = keys.find((key) => !answers[key]) ?? 'done';
+
+        if (currentStep !== 'done') {
+          answers[currentStep] = text;
+          const upcoming = nextStep(currentStep);
+          await supabase.from('agent_profiles').update({ onboarding_answers: answers, updated_at: new Date().toISOString() }).eq('agent_id', agentId);
+          if (upcoming === 'done') {
+            await supabase.from('agents').update({ status: 'online', updated_at: new Date().toISOString() }).eq('id', agentId);
+            await supabase.from('users').update({ onboarding_completed: true, updated_at: new Date().toISOString() }).eq('id', userId);
+            reply = 'Готово! 🎉\n\nЯ настроил твоего персонального помощника. Теперь просто пиши обычными сообщениями — задачи, вопросы, идеи. По мере работы я буду запоминать полезный контекст и подключать нужные инструменты.';
+          } else reply = onboardingQuestions[upcoming];
+          currentStep = upcoming;
+        } else {
+          reply = demoReply(text);
+          if (agentId) {
+            const { data: conversation } = await supabase.from('conversations').upsert({ agent_id: agentId, channel: 'telegram', external_chat_id: String(chatId), updated_at: new Date().toISOString() }, { onConflict: 'agent_id,external_chat_id' }).select().single();
+            if (conversation) {
+              await supabase.from('messages').insert([{ conversation_id: conversation.id, role: 'user', content: text }, { conversation_id: conversation.id, role: 'assistant', content: reply }]);
+              await supabase.from('usage_events').insert({ agent_id: agentId, event_type: 'message' });
+            }
           }
         }
       }
     }
-  } else reply = text === '/start' ? `Привет! 👋\n\nЯ ваш будущий персональный ИИ-помощник.\n\n${onboardingQuestions.name}` : demoReply(text);
+  } else {
+    reply = text === '/start' ? `Привет! 👋\n\nЯ помогу создать твоего персонального ИИ-помощника.\n\n${onboardingQuestions.name}` : demoReply(text);
+  }
 
   const telegram = await sendTelegram(chatId, reply);
   return NextResponse.json({ ok: true, chatId, reply, nextStep: currentStep, detectedTools: parseTools(text), persisted: Boolean(supabase), telegramSent: telegram.sent });
